@@ -1,0 +1,26 @@
+(menhir
+ (modules tokens)
+ (flags --only-tokens))
+
+(menhir
+ (modules tokens parser)
+ (merge_into parser)
+ (flags --external-tokens Tokens --dump --explain --unused-tokens))
+
+(ocamllex lexer)
+
+(library
+ (name bite_comp)
+ (libraries llvm llvm.irreader llvm.linker)
+ (preprocess (pps ppx_deriving.show ppx_deriving.ord))
+ (modules
+  lexer
+  tokens
+  parser
+  syntax
+  types
+  ))
+
+(env
+  (dev
+    (flags (:standard -warn-error -A -g))))
