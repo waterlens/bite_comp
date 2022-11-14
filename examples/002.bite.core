@@ -1,0 +1,27 @@
+pinger = \hpi.
+  case
+    mark hpo in
+    case
+      mark res in
+      goto hpi((#handle hpi hpo res))
+    of
+    | #handle (hpi hpo res) -> #unit
+    end
+  of
+  | #handle (hpi hpo res) -> (pinger hpi)
+  | #return -> #unit
+  end
+;
+ponger = \hpo.
+  case
+    mark hpi in
+    case
+      mark res in
+      goto hpo((#handle hpi hpo res))
+    of
+    | #handle (hpi hpo res) -> #unit
+    end
+  of
+  | #handle (hpi hpo res) -> (ponger hpo)
+  | #return -> #unit
+  end
