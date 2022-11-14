@@ -9,9 +9,19 @@
 
 (ocamllex lexer)
 
+(menhir
+ (modules core_tokens)
+ (flags --only-tokens))
+
+(menhir
+ (modules core_tokens core_parser)
+ (merge_into core_parser)
+ (flags --external-tokens Core_tokens --dump --explain --unused-tokens))
+
+(ocamllex core_lexer)
+
 (library
  (name bite_comp)
- (libraries llvm llvm.irreader llvm.linker)
  (preprocess (pps ppx_deriving.show ppx_deriving.ord))
  (modules
   lexer
@@ -19,6 +29,11 @@
   parser
   syntax
   types
+  c
+  core
+  core_lexer
+  core_tokens
+  core_parser
   ))
 
 (env

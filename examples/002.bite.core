@@ -8,7 +8,7 @@ pinger = \hpi.
     | #handle (hpi hpo res) -> #unit
     end
   of
-  | #handle (hpi hpo res) -> (pinger hpi)
+  | #handle (hpi hpo res) -> let _1 = (pinger hpi) in goto res((#handle hpi hpo res))
   | #return -> #unit
   end
 ;
@@ -22,6 +22,6 @@ ponger = \hpo.
     | #handle (hpi hpo res) -> #unit
     end
   of
-  | #handle (hpi hpo res) -> (ponger hpo)
+  | #handle (hpi hpo res) -> let _1 = (pinger hpi) in goto res((#handle hpi hpo res))
   | #return -> #unit
   end

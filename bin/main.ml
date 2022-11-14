@@ -19,18 +19,33 @@ let run file =
   Lexing.set_filename buf file;
   try
     let prog = Parser.prog Lexer.tokenize buf in
-    Printf.printf "%s" @@ Syntax.show_prog prog; ()
+    Printf.printf "%s\n" @@ Syntax.show_prog prog;
+    ()
   with
   | Parser.Error ->
       Printf.eprintf "Parser failed: %a\n%!" print_pos (lexeme_start_p buf)
   | Lexer.Error (_cause, location) ->
       Printf.eprintf "Lexer failed: %a\n%!" print_pos location
 
+let run_core file =
+  let ch = open_in_bin file in
+  let buf = Lexing.from_channel ch in
+  Lexing.set_filename buf file;
+  try
+    let core = Core_parser.start Core_lexer.tokenize buf in
+    Printf.printf "%s\n" @@ Core.show_core core;
+    ()
+  with
+  | Core_parser.Error ->
+      Printf.eprintf "Parser failed: %a\n%!" print_pos (lexeme_start_p buf)
+  | Core_lexer.Error (_cause, location) ->
+      Printf.eprintf "Lexer failed: %a\n%!" print_pos location
+
 let rec runs file_list =
   match file_list with
   | [] -> ()
   | x :: xs ->
-      run x;
+      if String.ends_with ~suffix:".core" x then run_core x else run x;
       runs xs
 
 let _ = Printexc.record_backtrace true
