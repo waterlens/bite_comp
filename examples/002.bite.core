@@ -1,27 +1,37 @@
-pinger = \hpi.
+(HPI:
+  #cont [#handle [HPI HPO R] #return [#unit]]) =
+  type #cont [#handle [HPI HPO R] #return [#unit]] ;
+(HPO:
+  #cont [#handle [HPI HPO R] #return [#unit]]) =
+  type #cont [#handle [HPI HPO R] #return [#unit]] ;
+(R:
+  #cont [#handle [HPI HPO R] !]) =
+  type #cont [#handle [HPI HPO R] !] ;
+
+(pinger: HPI -> #unit) = \(hpi: HPI).
   case
-    mark hpo in
+    mark (hpo: HPO) in
     case
-      mark res in
+      mark (res: R) in
       goto hpi((#handle hpi hpo res))
     of
     | #handle (hpi hpo res) -> #unit
     end
   of
-  | #handle (hpi hpo res) -> let _1 = (pinger hpi) in goto res((#handle hpi hpo res))
-  | #return -> #unit
+  | #handle (hpi hpo res) -> let _ = (pinger hpi) in goto res((#handle hpi hpo res))
+  | #return (_) -> #unit
   end
 ;
-ponger = \hpo.
+(ponger: HPO -> #unit) = \(hpo: HPO).
   case
-    mark hpi in
+    mark (hpi: HPI) in
     case
-      mark res in
+      mark (res: R) in
       goto hpo((#handle hpi hpo res))
     of
     | #handle (hpi hpo res) -> #unit
     end
   of
-  | #handle (hpi hpo res) -> let _1 = (pinger hpi) in goto res((#handle hpi hpo res))
-  | #return -> #unit
+  | #handle (hpi hpo res) -> let _ = (pinger hpi) in goto res((#handle hpi hpo res))
+  | #return (_) -> #unit
   end

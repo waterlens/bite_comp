@@ -22,7 +22,7 @@
 
 (library
  (name bite_comp)
- (preprocess (pps ppx_deriving.show ppx_deriving.ord))
+ (preprocess (pps ppx_deriving.show ppx_deriving.ord ppx_deriving.eq))
  (modules
   lexer
   tokens

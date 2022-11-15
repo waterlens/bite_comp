@@ -33,7 +33,7 @@ let run_core file =
   Lexing.set_filename buf file;
   try
     let core = Core_parser.start Core_lexer.tokenize buf in
-    Printf.printf "%s\n" @@ Core.show_core core;
+    Core.check_core core;
     ()
   with
   | Core_parser.Error ->

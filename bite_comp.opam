@@ -11,6 +11,9 @@ bug-reports: "https://github.com/waterlens/bite/issues"
 depends: [
   "ocaml"
   "dune" {>= "3.3"}
+  "llvm"
+  "llvm.irreader"
+  "llvm.linker"
   "odoc" {with-doc}
 ]
 build: [

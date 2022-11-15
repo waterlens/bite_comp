@@ -7,7 +7,7 @@ open Core
 
 %%
 start:
-| bd = binding "<eof>" { [bd] }
+| bd = binding "<eof>" { Core bd }
 
 var: 
 | s = "<id>" { Named s }
@@ -16,15 +16,12 @@ var:
 ctor:
 | "#" s = "<id>"
   { 
-    match s with
-    | "unit" -> CtUnit
-    | "raw_int" -> CtRawInt
-    | "return" -> CtReturn
-    | "handle" -> CtHandle
-    | "true" -> CtTrue
-    | "false" -> CtFalse
-    | "tuple" -> CtTuple
-    | _ -> raise @@ Exn "not a ctor"
+    ctor_of_string s
+  }
+
+| "#" n = "<int>"
+  {
+    CtInt n
   }
 
 ty:
@@ -41,23 +38,22 @@ ty_arrow:
   }
 
 ty_forall:
-| "/\\" s = "<id>" "." ty = ty_app { TForall (s, ty) }
+| "\\" s = "<id>" "." ty = ty_app { TForall (s, ty) }
+| ty = ty_app { ty }
 
 ty_app:
-| ty1 = ty_atom
+| ty = ty_atom { ty } 
+| "(" t1 = ty_atom tys = nonempty_list(ty_atom) ")" 
   {
-    ty1
-  }
-| ty1 = ty_atom tys = nonempty_list(ty_atom)
-  {
-    List.fold_right (fun x y -> TApp (y, x)) tys ty1
+    List.fold_right (fun x y -> TApp (y, x)) tys t1 
   }
 
 ty_atom:
 | s = "<id>" { TVar (Named s) }
-| ct = ctor { TCtor ct }
+| ct = ctor { TCtor (ct, []) }
+| ct = ctor "[" tys = list(ty) "]" { TCtor (ct, tys) }
 | "(" ty = ty_arrow ")" { ty }
-
+| "!" { TNever }
 
 simple_binding:
 | v = var "=" e = expr { (v, e) }
@@ -72,17 +68,19 @@ binding:
 
 expr:
 | e = expr_atom { e }
-| "(" f = expr_atom a = nonempty_list(expr_atom) ")" { App (f, a) }
+| "(" f = expr_atom a = expr_atom ")" { App (f, a) }
+| "(" ct = ctor xs = nonempty_list(expr_atom) ")" { Ctor (ct, xs) }
+| ct = ctor { Ctor (ct, []) }
 
 expr_atom:
 | "(" e = expr ")" { e }
 | v = var { Var v }
 | "\\" v = var "." x = expr { Lam (v, x) }
 | "let" bd = binding "in" e = expr { Let(bd, e) }
-| "mark" s = "<id>" "in" e = expr { Mark(s, e) }
-| "goto" s = "<id>" "(" e = expr ")" { Goto(s, e) }
+| "mark" v = var "in" e = expr { Mark(v, e) }
+| "goto" v = var "(" e = expr ")" { Goto(v, e) }
 | "case" e = expr "of" brs = nonempty_list(branch) "end" { Case (e, brs) } 
-| ct = ctor { Ctor ct }
+| "type" ty = ty { Type ty }
 
 branch:
 | "|" p = pattern "->" e = expr { (p, e) }
