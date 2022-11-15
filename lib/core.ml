@@ -9,8 +9,10 @@ and ty =
   | TApp of ty * ty
   | TForall of string * ty
   | TArrow of ty * ty
+  | TLit of tlit
   | TNever
 
+and tlit = TInt | TBool
 and core = Core of binding
 and binding = Rec of (var * expr) list | NonRec of (var * expr)
 
@@ -19,6 +21,7 @@ and expr =
   | Lam of var * expr
   | App of expr * expr
   | Ctor of ctor * expr list
+  | Lit of literal
   | Let of binding * expr
   | Case of expr * (pattern * expr) list
   | Mark of var * expr
@@ -26,17 +29,8 @@ and expr =
   | Type of ty
 
 and pattern = PVar of var | PCon of ctor * var list | PWild
-
-and ctor =
-  | CtUnit
-  | CtTrue
-  | CtFalse
-  | CtInt of int
-  | CtHandle
-  | CtReturn
-  | CtTuple
-  | CtCont
-  | CtUnion
+and ctor = CtUnit | CtHandle | CtReturn | CtTuple | CtCont | CtUnion
+and literal = Int of int | Bool of bool
 
 type arity = Any | None | Number of int
 
@@ -46,23 +40,23 @@ let ctor_of_string = function
   | "unit" -> CtUnit
   | "return" -> CtReturn
   | "handle" -> CtHandle
-  | "true" -> CtTrue
-  | "false" -> CtFalse
   | "tuple" -> CtTuple
   | "cont" -> CtCont
   | "union" -> CtUnion
   | _ -> raise @@ Exn "not a ctor"
 
+let tlit_of_string = function
+  | "bool" -> TBool
+  | "int" -> TInt
+  | _ -> raise @@ Exn "not a type literal"
+
 let string_of_ctor = function
   | CtUnit -> "#unit"
   | CtReturn -> "#return"
   | CtHandle -> "#handle"
-  | CtTrue -> "#true"
-  | CtFalse -> "#false"
   | CtTuple -> "#tuple"
   | CtCont -> "#cont"
   | CtUnion -> "#union"
-  | CtInt n -> "#" ^ string_of_int n
 
 let aux_show_list f l = String.concat " " @@ List.map f l
 
@@ -73,6 +67,8 @@ let rec show_ty = function
   | TApp (t1, t2) -> sprintf "(%s %s)" (show_ty t1) (show_ty t2)
   | TForall (name, ty) -> sprintf "\\%s. (%s)" name (show_ty ty)
   | TArrow (t1, t2) -> sprintf "%s -> %s" (show_ty t1) (show_ty t2)
+  | TLit TInt -> "%int"
+  | TLit TBool -> "%bool"
   | TNever -> "!"
 
 and show_var = function
@@ -81,9 +77,6 @@ and show_var = function
 
 let arity_of_ctor = function
   | CtUnit -> None
-  | CtTrue -> None
-  | CtFalse -> None
-  | CtInt _ -> None
   | CtHandle -> Any
   | CtReturn -> Number 1
   | CtTuple -> Any
@@ -140,11 +133,14 @@ let rec equal_ty ctx t1 t2 =
   | _ -> (
       match (type_of ctx t1, type_of ctx t2) with
       | TCtor (c1, ts1), TCtor (c2, ts2) ->
-          c1 = c2 && List.for_all2 ( =* ) ts1 ts2
+          c1 = c2
+          && List.length ts1 = List.length ts2
+          && List.for_all2 ( =* ) ts1 ts2
       | TApp (t1, t2), TApp (t3, t4) -> t1 =* t3 && t2 =* t4
       | TForall (v1, t1), TForall (v2, t2) -> v1 = v2 && t1 =* t2
       | TArrow (t1, t2), TArrow (t3, t4) -> t1 =* t3 && t2 =* t4
       | TNever, TNever -> true
+      | TLit l1, TLit l2 -> l1 = l2
       | _ -> false)
 
 let filter_never_type =
@@ -224,10 +220,10 @@ let rec type_of_expr ctx =
         ok @@ bindings @ ctx
       in
       let check_pattern_var_num vars tys =
-        if List.length vars < List.length tys then
-          error @@ wrong_info "pattern variables are not enough"
-        else if List.length vars > List.length tys then
-          error @@ wrong_info "pattern variables are more than needed"
+        if List.length vars <> List.length tys then
+          error @@ wrong_info
+          @@ sprintf "wrong number of pattern variables: expected %d, got %d"
+               (List.length tys) (List.length vars)
         else ok ()
       in
       let bind_pattern ctx pat ty =
@@ -319,7 +315,9 @@ let rec type_of_expr ctx =
               @@ sprintf
                    "%s: label has wrong return type: expr type is %s but label \
                     is %s"
-                   (name_of_var var) (show_ty ty) (show_ty label)
+                   (name_of_var var)
+                   (show_ty @@ TCtor (CtReturn, [ ty ]))
+                   (show_ty label)
           in
           ok ty
       | _ ->
@@ -346,6 +344,8 @@ let rec type_of_expr ctx =
       in
       ok TNever
   | Type ty -> ok ty
+  | Lit (Int _) -> ok @@ TLit TInt
+  | Lit (Bool _) -> ok @@ TLit TBool
 
 and update_ctx_with_binding ctx bind =
   let ( =* ) t1 t2 = equal_ty ctx t1 t2 in

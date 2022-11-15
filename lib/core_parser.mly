@@ -19,9 +19,20 @@ ctor:
     ctor_of_string s
   }
 
-| "#" n = "<int>"
+tlit:
+| "%" s = "<id>"
+  { 
+    tlit_of_string s
+  }
+
+lit:
+| n = "<int>"
   {
-    CtInt n
+    Lit (Int n)
+  }
+| n = "<bool>"
+  {
+    Lit (Bool n)
   }
 
 ty:
@@ -54,6 +65,7 @@ ty_atom:
 | ct = ctor "[" tys = list(ty) "]" { TCtor (ct, tys) }
 | "(" ty = ty_arrow ")" { ty }
 | "!" { TNever }
+| tl = tlit { TLit tl }
 
 simple_binding:
 | v = var "=" e = expr { (v, e) }
@@ -71,6 +83,7 @@ expr:
 | "(" f = expr_atom a = expr_atom ")" { App (f, a) }
 | "(" ct = ctor xs = nonempty_list(expr_atom) ")" { Ctor (ct, xs) }
 | ct = ctor { Ctor (ct, []) }
+| li = lit { li }
 
 expr_atom:
 | "(" e = expr ")" { e }
