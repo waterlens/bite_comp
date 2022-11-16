@@ -6,8 +6,12 @@ open Core
 %type <core> start
 
 %%
+
+global_binding:
+| "let" bd = binding "end" { bd }
+
 start:
-| bd = binding "<eof>" { Core bd }
+| bds = nonempty_list(global_binding) "<eof>" { Core bds }
 
 var: 
 | s = "<id>" { Named s }
@@ -70,12 +74,19 @@ ty_atom:
 simple_binding:
 | v = var "=" e = expr { (v, e) }
 
+type_binding:
+| v = var "=" "type" t = ty { (v, t) }
+
 binding:
 | bds = separated_nonempty_list(";", simple_binding)
   {
     match bds with
     | [x] -> let (a, b) = x in NonRec (a, b)
     | _ -> Rec bds
+  }
+| bds = separated_nonempty_list(";", type_binding)
+  {
+    RecType bds
   }
 
 expr:
@@ -93,7 +104,6 @@ expr_atom:
 | "mark" v = var "in" e = expr { Mark(v, e) }
 | "goto" v = var "(" e = expr ")" { Goto(v, e) }
 | "case" e = expr "of" brs = nonempty_list(branch) "end" { Case (e, brs) } 
-| "type" ty = ty { Type ty }
 
 branch:
 | "|" p = pattern "->" e = expr { (p, e) }

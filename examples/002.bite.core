@@ -1,13 +1,9 @@
-(HPI:
-  #cont [#handle [HPI HPO R] #return [#unit]]) =
-  type #cont [#handle [HPI HPO R] #return [#unit]] ;
-(HPO:
-  #cont [#handle [HPI HPO R] #return [#unit]]) =
-  type #cont [#handle [HPI HPO R] #return [#unit]] ;
-(R:
-  #cont [#handle [HPI HPO R] !]) =
-  type #cont [#handle [HPI HPO R] !] ;
+let HPI = type #cont [#handle [HPI HPO R] #return [#unit]] ;
+    HPO = type #cont [#handle [HPI HPO R] #return [#unit]] ;
+    R = type #cont [#handle [HPI HPO R] !]
+end
 
+let
 (pinger: HPI -> #unit) = \(hpi: HPI).
   case
     mark (hpo: HPO) in
@@ -20,8 +16,8 @@
   of
   | #handle (hpi hpo res) -> let _ = (pinger hpi) in goto res((#handle hpi hpo res))
   | #return (_) -> #unit
-  end
-;
+  end;
+
 (ponger: HPO -> #unit) = \(hpo: HPO).
   case
     mark (hpi: HPI) in
@@ -35,3 +31,4 @@
   | #handle (hpi hpo res) -> let _ = (pinger hpi) in goto res((#handle hpi hpo res))
   | #return (_) -> #unit
   end
+end

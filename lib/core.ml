@@ -13,8 +13,12 @@ and ty =
   | TNever
 
 and tlit = TInt | TBool
-and core = Core of binding
-and binding = Rec of (var * expr) list | NonRec of (var * expr)
+and core = Core of binding list
+
+and binding =
+  | Rec of (var * expr) list
+  | NonRec of (var * expr)
+  | RecType of (var * ty) list
 
 and expr =
   | Var of var
@@ -26,7 +30,6 @@ and expr =
   | Case of expr * (pattern * expr) list
   | Mark of var * expr
   | Goto of var * expr
-  | Type of ty
 
 and pattern = PVar of var | PCon of ctor * var list | PWild
 and ctor = CtUnit | CtHandle | CtReturn | CtTuple | CtCont | CtUnion
@@ -75,6 +78,9 @@ and show_var = function
   | Named s -> s
   | Annotated (s, ty) -> sprintf "(%s: %s)" (show_var s) (show_ty ty)
 
+let show_ty_ctx =
+  aux_show_list (fun (s, t) -> sprintf "%s : %s\n" s @@ show_ty t)
+
 let arity_of_ctor = function
   | CtUnit -> None
   | CtHandle -> Any
@@ -90,27 +96,51 @@ let arity_satisfy x = function
   | _ -> false
 
 let ( let* ) = bind
+let ( let+ ) x f = map f x
+
+let rec iterM f = function
+  | [] -> ok ()
+  | a :: l ->
+      let* () = f a in
+      let+ t = iterM f l in
+      t
 
 let rec mapM f = function
   | [] -> ok []
   | a :: l ->
       let* r = f a in
-      let* t = mapM f l in
-      ok @@ (r :: t)
+      let+ t = mapM f l in
+      r :: t
 
 let rec map2M f l1 l2 =
   match (l1, l2) with
   | [], [] -> ok []
   | a1 :: l1, a2 :: l2 ->
       let* r = f a1 a2 in
-      let* t = map2M f l1 l2 in
-      ok @@ (r :: t)
+      let+ t = map2M f l1 l2 in
+      r :: t
   | _, _ -> invalid_arg "map2M"
 
-type fail_reason = WrongInfo of string | LackInfo of string [@@deriving show]
+let rec fold_leftM f accu l =
+  match l with
+  | [] -> ok accu
+  | a :: l ->
+      let* n = f accu a in
+      fold_leftM f n l
+
+type fail_reason =
+  | NotApplicable of string
+  | WrongInfo of string
+  | LackInfo of string
 
 let wrong_info x = WrongInfo x
 let lack_info x = LackInfo x
+let not_applicable x = NotApplicable x
+
+let show_fail_reason = function
+  | NotApplicable s -> s
+  | WrongInfo s -> s
+  | LackInfo s -> s
 
 let rec name_of_var = function
   | Named s -> s
@@ -118,7 +148,11 @@ let rec name_of_var = function
 
 let type_of_var ctx = function
   | Named s ->
-      Option.to_result ~none:(lack_info @@ "can't determine the type of " ^ s)
+      Option.to_result
+        ~none:
+          (lack_info
+          @@ sprintf "can't determine the type of %s\nctx:\n %s" s
+          @@ show_ty_ctx ctx)
       @@ List.assoc_opt s ctx
   | Annotated (_, ty) -> ok ty
 
@@ -209,7 +243,7 @@ let rec type_of_expr ctx =
       let* ty = type_of_expr ctx expr in
       let ty = type_of ctx ty in
       let check_pattern_bind ctx vars tys =
-        let* tys =
+        let+ tys =
           map2M check_bind
             (List.map (fun x -> type_of_var ctx x) vars)
             (List.map (fun x -> ok x) tys)
@@ -217,7 +251,7 @@ let rec type_of_expr ctx =
         let bindings =
           List.map2 (fun var ty -> (name_of_var var, ty)) vars tys
         in
-        ok @@ bindings @ ctx
+        bindings @ ctx
       in
       let check_pattern_var_num vars tys =
         if List.length vars <> List.length tys then
@@ -306,7 +340,7 @@ let rec type_of_expr ctx =
       | TCtor (CtCont, [ x; y ]) ->
           let new_ctx = (name_of_var var, label) :: ctx in
           let* ty = type_of_expr new_ctx exp in
-          let* ty =
+          let+ ty =
             if ty =* TNever then ok @@ TCtor (CtUnion, [ x ])
             else if TCtor (CtReturn, [ ty ]) =* y then
               ok @@ TCtor (CtUnion, [ x; TCtor (CtReturn, [ ty ]) ])
@@ -319,7 +353,7 @@ let rec type_of_expr ctx =
                    (show_ty @@ TCtor (CtReturn, [ ty ]))
                    (show_ty label)
           in
-          ok ty
+          ty
       | _ ->
           error @@ wrong_info
           @@ sprintf "%s: label should be annotated with cont type"
@@ -327,7 +361,7 @@ let rec type_of_expr ctx =
   | Goto (var, exp) ->
       let* label = type_of_var ctx var in
       let label = type_of ctx label in
-      let* _ =
+      let+ _ =
         match label with
         | TCtor (CtCont, x :: _) ->
             let* ty = type_of_expr ctx exp in
@@ -335,15 +369,14 @@ let rec type_of_expr ctx =
             else
               error @@ wrong_info
               @@ sprintf
-                   "go to wrong label: checked expr type: %s\nannotated: %s\n"
+                   "go to wrong label: checked expr type: %s\nannotated: %s"
                    (show_ty ty) (show_ty x)
         | _ ->
             error @@ wrong_info
             @@ sprintf "%s: label should be annotated with cont type"
                  (name_of_var var)
       in
-      ok TNever
-  | Type ty -> ok ty
+      TNever
   | Lit (Int _) -> ok @@ TLit TInt
   | Lit (Bool _) -> ok @@ TLit TBool
 
@@ -352,16 +385,16 @@ and update_ctx_with_binding ctx bind =
   let check_bind = check_bind ( =* ) in
   match bind with
   | NonRec (x, e1) ->
-      let* t = check_bind (type_of_var ctx x) (type_of_expr ctx e1) in
-      ok ((name_of_var x, t) :: ctx)
+      let+ t = check_bind (type_of_var ctx x) (type_of_expr ctx e1) in
+      (name_of_var x, t) :: ctx
   | Rec bindings ->
       let rec type_bindings acc = function
         | [] -> ok @@ List.rev acc
         | (var, _) :: xs ->
             let* ty = type_of_var ctx var in
             let name = name_of_var var in
-            let* acc = type_bindings ((name, ty) :: acc) xs in
-            ok acc
+            let+ acc = type_bindings ((name, ty) :: acc) xs in
+            acc
       in
       let rec expr_types acc ctx = function
         | [] -> List.rev acc
@@ -373,27 +406,145 @@ and update_ctx_with_binding ctx bind =
       let* type_bindings = type_bindings [] bindings in
       let new_ctx = type_bindings @ ctx in
       let expr_types = expr_types [] new_ctx bindings in
-      let* _ =
+      let+ _ =
         map2M (fun (_, t1) t2 -> check_bind (Ok t1) t2) type_bindings expr_types
       in
-      ok new_ctx
-
-let emit_binding =
-  let emit_binding_declaration (_, exp) =
-    match exp with
-    | Lam _ -> ()
-    | _ -> raise @@ Exn "a global binding must be a lambda abstraction"
-  in
-  let emit_binding_impl _ = () in
-  function
-  | Rec bindings ->
-      List.iter emit_binding_declaration bindings;
-      List.iter emit_binding_impl bindings
-  | NonRec binding -> emit_binding_impl binding
+      new_ctx
+  | RecType bindings ->
+      let+ new_bindings =
+        mapM
+          (fun (v, t) ->
+            let+ checked_ty = check_bind (type_of_var ctx v) (Ok t) in
+            (name_of_var v, checked_ty))
+          bindings
+      in
+      new_bindings @ ctx
 
 let check_core core =
   let ctx = [] in
   let (Core binding) = core in
-  match update_ctx_with_binding ctx binding with
-  | Ok _ -> ()
-  | Error reason -> printf "%s" @@ show_fail_reason reason
+  let+ ctx =
+    fold_leftM
+      (fun ctx binding -> update_ctx_with_binding ctx binding)
+      ctx binding
+  in
+  ctx
+
+let cexpr_of_var cexprctx name =
+  Option.to_result ~none:(not_applicable @@ name ^ " can't be a C expression")
+  @@ List.assoc_opt name cexprctx
+
+let rec ty_to_ctype ctx = function
+  | TVar _ as t -> ty_to_ctype ctx @@ type_of ctx t
+  | TCtor (ctor, _) -> (
+      ok
+      @@
+      match ctor with
+      | CtUnit -> C.inline_type "struct rt_unit *"
+      | CtReturn -> C.inline_type "struct rt_return *"
+      | CtHandle -> C.inline_type "struct rt_handle *"
+      | CtTuple -> C.inline_type "struct rt_tuple *"
+      | CtCont -> C.inline_type "struct rt_cont *"
+      | CtUnion -> C.inline_type "union rt_union *")
+  | TApp _ | TForall _ ->
+      error @@ not_applicable "unable to convert high order type to ctype"
+  | TArrow (a, b) ->
+      let* a = ty_to_ctype ctx a in
+      let+ b = ty_to_ctype ctx b in
+      C.func b [ a ]
+  | TLit TInt -> ok @@ C.int
+  | TLit TBool -> ok @@ C.int
+  | TNever -> ok @@ C.void
+
+let placeholder = C.inline_expr "rt_expr_placeholer"
+
+let fplaceholder =
+  C.make_cfunction_declaration "rt_function_placeholder" (C.ptr C.void) []
+
+let emit_core_binding_decl buf tyctx var = function
+  | Lam (x, b) ->
+      let* t1 = type_of_var tyctx x in
+      let* t1' = ty_to_ctype tyctx t1 in
+      let* t2 = type_of_expr ((name_of_var x, t1) :: tyctx) b in
+      let* t2' = ty_to_ctype tyctx t2 in
+      let cfunc =
+        C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
+      in
+      Buffer.add_string buf @@ C.show_cfunction cfunc;
+      ok ()
+  | _ ->
+      error
+      @@ not_applicable "other expressions are not allowed in global scope"
+
+let rec emit_expr fresh stmts tyctx cexprctx = function
+  | Var var ->
+      let+ cexpr = cexpr_of_var cexprctx @@ name_of_var var in
+      cexpr
+  | Lam _ ->
+      error
+      @@ not_applicable
+           "doesn't allow high order functions in normal expressions"
+  | App (f, a) as expr ->
+      let* f = emit_expr fresh stmts tyctx cexprctx f in
+      let* a = emit_expr fresh stmts tyctx cexprctx a in
+      let* t = type_of_expr tyctx expr in
+      let* ct = ty_to_ctype tyctx t in
+      let tmp = fresh () in
+      let st = C.decl tmp ct @@ Option.some @@ C.call f [ a ] in
+      stmts := st :: !stmts;
+      ok @@ C.var tmp
+  | Ctor (ctor, xs) -> ok placeholder
+  | Lit (Bool b) -> ok @@ C.lit @@ C.lbool b
+  | Lit (Int n) -> ok @@ C.lit @@ C.lint n
+  | Let (binding, e) -> ok placeholder
+  | Case (e, branches) -> ok placeholder
+  | Mark (label, exp) -> ok placeholder
+  | Goto (label, exp) -> ok placeholder
+
+let emit_core_binding buf tyctx var = function
+  | Lam (x, b) ->
+      let* t1 = type_of_var tyctx x in
+      let* t1' = ty_to_ctype tyctx t1 in
+      let* t2 = type_of_expr ((name_of_var x, t1) :: tyctx) b in
+      let* t2' = ty_to_ctype tyctx t2 in
+      let cfunc =
+        C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
+      in
+      Buffer.add_string buf @@ C.show_cfunction cfunc;
+      ok ()
+  | _ ->
+      error
+      @@ not_applicable "other expressions are not allowed in global scope"
+
+let emit_core core =
+  let ctx = [] in
+  let (Core binding) = core in
+  let buf = Buffer.create 1024 in
+  let* ctx =
+    fold_leftM
+      (fun ctx binding -> update_ctx_with_binding ctx binding)
+      ctx binding
+  in
+  let* () =
+    iterM
+      (fun binding ->
+        match binding with
+        | NonRec (var, expr) -> emit_core_binding_decl buf ctx var expr
+        | Rec bds ->
+            iterM
+              (fun (var, expr) -> emit_core_binding_decl buf ctx var expr)
+              bds
+        | RecType _ -> ok ())
+      binding
+  in
+  let+ () =
+    iterM
+      (fun binding ->
+        match binding with
+        | NonRec (var, expr) -> emit_core_binding buf ctx var expr
+        | Rec bds ->
+            iterM (fun (var, expr) -> emit_core_binding buf ctx var expr) bds
+        | RecType _ -> ok ())
+      binding
+  in
+  Buffer.to_bytes buf
