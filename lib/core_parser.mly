@@ -94,9 +94,9 @@ expr:
 | "(" f = expr_atom a = expr_atom ")" { App (f, a) }
 | "(" ct = ctor xs = nonempty_list(expr_atom) ")" { Ctor (ct, xs) }
 | ct = ctor { Ctor (ct, []) }
-| li = lit { li }
 
 expr_atom:
+| li = lit { li }
 | "(" e = expr ")" { e }
 | v = var { Var v }
 | "\\" v = var "." x = expr { Lam (v, x) }

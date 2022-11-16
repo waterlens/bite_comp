@@ -276,13 +276,18 @@ let rec type_of_expr ctx =
         | PWild -> ok ctx
         | PVar v -> ok @@ ((name_of_var v, TCtor (CtUnion, types)) :: ctx)
         | PCon (ctor, vars) -> (
-            let ty =
-              List.find
-                (fun ty ->
-                  match ty with
-                  | TCtor (ctor', _) when ctor = ctor' -> true
-                  | _ -> false)
-                types
+            let* ty =
+              Option.to_result
+                ~none:
+                  (wrong_info
+                  @@ sprintf "can't found type for ctor: %s"
+                  @@ string_of_ctor ctor)
+              @@ List.find_opt
+                   (fun ty ->
+                     match ty with
+                     | TCtor (ctor', _) when ctor = ctor' -> true
+                     | _ -> false)
+                   types
             in
             match ty with
             | TCtor (ctor', tys) when ctor = ctor' ->

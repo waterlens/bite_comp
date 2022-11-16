@@ -1,0 +1,29 @@
+let YIELD = type #cont [#handle [%int R] #return [%bool]];
+    R     = type #cont [#handle [%bool]  #return [%bool]]
+end
+let
+  (main: #unit -> %bool) = \(_1: #unit).
+    case
+      mark (hyd: YIELD) in
+      case
+        mark (res: R) in
+        goto hyd((#handle 1 res))
+      of
+      | #handle (flag) -> flag 
+      end
+    of
+    | #return (v) -> v
+    | #handle (n res) -> let _ = n in goto res((#handle true))
+    end
+end
+let
+  (main_with_tro: #unit -> %bool) = \(_1: #unit).
+    case
+      mark (hyd: YIELD) in
+      let _ = 1 in
+      true
+    of
+    | #return (v) -> v
+    | #handle (n res) -> let _ = n in goto res((#handle true))
+    end
+end

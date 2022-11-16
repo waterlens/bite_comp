@@ -1,6 +1,6 @@
 let HPI = type #cont [#handle [HPI HPO R] #return [#unit]] ;
     HPO = type #cont [#handle [HPI HPO R] #return [#unit]] ;
-    R = type #cont [#handle [HPI HPO R] !]
+    R   = type #cont [#handle [HPI HPO R] !]
 end
 
 let

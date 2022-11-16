@@ -1,11 +1,10 @@
+let EXN = type #cont [#handle #return [%int]] end
 let
-  (main: #unit -> #unit) = \(_1: #unit).
-    let EXN = type #cont [#handle [] #return [%int]] in
+  main = \(_1: #unit).
     case
       mark (hexn: EXN) in
-      1
+      goto hexn(#handle)
     of
-    | #return (_2) -> #unit
     | #handle -> #unit
     end
 end
