@@ -121,6 +121,14 @@ let rec map2M f l1 l2 =
       r :: t
   | _, _ -> invalid_arg "map2M"
 
+let rec map3 f l1 l2 l3 =
+  match (l1, l2, l3) with
+  | [], [], [] -> []
+  | a1 :: l1, a2 :: l2, a3 :: l3 ->
+      let r = f a1 a2 a3 in
+      r :: map3 f l1 l2 l3
+  | _, _, _ -> invalid_arg "map3"
+
 let rec fold_leftM f accu l =
   match l with
   | [] -> ok accu
@@ -212,6 +220,12 @@ let check_bind eq t1 t2 =
       @@ wrong_info
            "the annotated type is not equal with checked type of expression"
 
+let types_of_vars ctx =
+  mapM (fun (var, _) ->
+      let+ ty = type_of_var ctx var in
+      let name = name_of_var var in
+      (name, ty))
+
 let rec type_of_expr ctx =
   let ( =* ) t1 t2 = equal_ty ctx t1 t2 in
   let check_bind = check_bind ( =* ) in
@@ -237,7 +251,7 @@ let rec type_of_expr ctx =
         let* xst = mapM (fun x -> type_of_expr ctx x) xs in
         ok @@ TCtor (ctor, xst)
   | Let (bind, e2) ->
-      let* new_ctx = update_ctx_with_binding ctx bind in
+      let* new_ctx = update_ctx_with_binding ctx bind ~allow_rec:false in
       type_of_expr new_ctx e2
   | Case (expr, branches) -> (
       let* ty = type_of_expr ctx expr in
@@ -385,52 +399,55 @@ let rec type_of_expr ctx =
   | Lit (Int _) -> ok @@ TLit TInt
   | Lit (Bool _) -> ok @@ TLit TBool
 
-and update_ctx_with_binding ctx bind =
+and update_ctx_with_binding ctx bind ~allow_rec =
+  match bind with
+  | NonRec binding -> update_ctx_with_nonrec_binding ctx binding
+  | Rec bindings -> update_ctx_with_rec_binding ctx bindings ~allow_rec
+  | RecType bindings -> update_ctx_with_type_rec_binding ctx bindings
+
+and update_ctx_with_nonrec_binding ctx (x, e1) =
   let ( =* ) t1 t2 = equal_ty ctx t1 t2 in
   let check_bind = check_bind ( =* ) in
-  match bind with
-  | NonRec (x, e1) ->
-      let+ t = check_bind (type_of_var ctx x) (type_of_expr ctx e1) in
-      (name_of_var x, t) :: ctx
-  | Rec bindings ->
-      let rec type_bindings acc = function
-        | [] -> ok @@ List.rev acc
-        | (var, _) :: xs ->
-            let* ty = type_of_var ctx var in
-            let name = name_of_var var in
-            let+ acc = type_bindings ((name, ty) :: acc) xs in
-            acc
-      in
-      let rec expr_types acc ctx = function
-        | [] -> List.rev acc
-        | (_, exp) :: xs ->
-            let ty = type_of_expr ctx exp in
-            let acc = expr_types (ty :: acc) ctx xs in
-            acc
-      in
-      let* type_bindings = type_bindings [] bindings in
-      let new_ctx = type_bindings @ ctx in
-      let expr_types = expr_types [] new_ctx bindings in
-      let+ _ =
-        map2M (fun (_, t1) t2 -> check_bind (Ok t1) t2) type_bindings expr_types
-      in
-      new_ctx
-  | RecType bindings ->
-      let+ new_bindings =
-        mapM
-          (fun (v, t) ->
-            let+ checked_ty = check_bind (type_of_var ctx v) (Ok t) in
-            (name_of_var v, checked_ty))
-          bindings
-      in
-      new_bindings @ ctx
+  let+ t = check_bind (type_of_var ctx x) (type_of_expr ctx e1) in
+  (name_of_var x, t) :: ctx
+
+and update_ctx_with_rec_binding ctx bindings ~allow_rec =
+  let ( =* ) t1 t2 = equal_ty ctx t1 t2 in
+  let check_bind = check_bind ( =* ) in
+  let* types_of_vars = types_of_vars ctx bindings in
+  let new_ctx = types_of_vars @ ctx in
+  let expr_types =
+    types_of_exprs (if allow_rec then new_ctx else ctx) bindings
+  in
+  let+ final =
+    map2M
+      (fun (name, t1) t2 ->
+        let+ ty = check_bind (Ok t1) t2 in
+        (name, ty))
+      types_of_vars expr_types
+  in
+  final @ ctx
+
+and update_ctx_with_type_rec_binding ctx tbindings =
+  let ( =* ) t1 t2 = equal_ty ctx t1 t2 in
+  let check_bind = check_bind ( =* ) in
+  let+ new_bindings =
+    mapM
+      (fun (v, t) ->
+        let+ checked_ty = check_bind (type_of_var ctx v) (Ok t) in
+        (name_of_var v, checked_ty))
+      tbindings
+  in
+  new_bindings @ ctx
+
+and types_of_exprs ctx = List.map (fun (_, exp) -> type_of_expr ctx exp)
 
 let check_core core =
   let ctx = [] in
   let (Core binding) = core in
   let+ ctx =
     fold_leftM
-      (fun ctx binding -> update_ctx_with_binding ctx binding)
+      (fun ctx binding -> update_ctx_with_binding ctx binding ~allow_rec:true)
       ctx binding
   in
   ctx
@@ -466,7 +483,7 @@ let placeholder = C.inline_expr "rt_expr_placeholer"
 let fplaceholder =
   C.make_cfunction_declaration "rt_function_placeholder" (C.ptr C.void) []
 
-let emit_core_binding_decl buf tyctx var = function
+let emit_core_binding_decl funcs tyctx var = function
   | Lam (x, b) ->
       let* t1 = type_of_var tyctx x in
       let* t1' = ty_to_ctype tyctx t1 in
@@ -475,7 +492,7 @@ let emit_core_binding_decl buf tyctx var = function
       let cfunc =
         C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
       in
-      Buffer.add_string buf @@ C.show_cfunction cfunc;
+      funcs := cfunc :: !funcs;
       ok ()
   | _ ->
       error
@@ -501,12 +518,46 @@ let rec emit_expr fresh stmts tyctx cexprctx = function
   | Ctor (ctor, xs) -> ok placeholder
   | Lit (Bool b) -> ok @@ C.lit @@ C.lbool b
   | Lit (Int n) -> ok @@ C.lit @@ C.lint n
-  | Let (binding, e) -> ok placeholder
+  | Let (binding, e) ->
+      let emit_local_bind = function
+        | NonRec (var, expr) ->
+            let tmp = fresh () in
+            let* t = type_of_expr tyctx expr in
+            let* ct = ty_to_ctype tyctx t in
+            let+ init = emit_expr fresh stmts tyctx cexprctx expr in
+            let st = C.decl tmp ct @@ Option.some init in
+            stmts := st :: !stmts;
+            (tyctx, (name_of_var var, C.var tmp) :: cexprctx)
+        | Rec bindings ->
+            let tmps = List.map (fun _ -> fresh ()) bindings in
+            let* ts = types_of_vars tyctx bindings in
+            let* cts = mapM (fun (_, ty) -> ty_to_ctype tyctx ty) ts in
+            let+ inits =
+              mapM
+                (fun (_, expr) -> emit_expr fresh stmts tyctx cexprctx expr)
+                bindings
+            in
+            let sts =
+              map3
+                (fun tmp ct init -> C.decl tmp ct @@ Option.some init)
+                tmps cts inits
+            in
+            stmts := List.rev sts @ !stmts;
+            let cexprctx =
+              List.map2 (fun (name, _) tmp -> (name, C.var tmp)) ts tmps
+            in
+            (tyctx, cexprctx)
+        | RecType bindings ->
+            let+ tyctx = update_ctx_with_type_rec_binding tyctx bindings in
+            (tyctx, cexprctx)
+      in
+      let* (tyctx, cexprctx) = emit_local_bind binding in
+      ok placeholder
   | Case (e, branches) -> ok placeholder
   | Mark (label, exp) -> ok placeholder
   | Goto (label, exp) -> ok placeholder
 
-let emit_core_binding buf tyctx var = function
+let emit_core_binding funcs tyctx var = function
   | Lam (x, b) ->
       let* t1 = type_of_var tyctx x in
       let* t1' = ty_to_ctype tyctx t1 in
@@ -515,7 +566,7 @@ let emit_core_binding buf tyctx var = function
       let cfunc =
         C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
       in
-      Buffer.add_string buf @@ C.show_cfunction cfunc;
+      funcs := cfunc :: !funcs;
       ok ()
   | _ ->
       error
@@ -524,20 +575,20 @@ let emit_core_binding buf tyctx var = function
 let emit_core core =
   let ctx = [] in
   let (Core binding) = core in
-  let buf = Buffer.create 1024 in
   let* ctx =
     fold_leftM
-      (fun ctx binding -> update_ctx_with_binding ctx binding)
+      (fun ctx binding -> update_ctx_with_binding ctx binding ~allow_rec:true)
       ctx binding
   in
+  let funcs = ref [] in
   let* () =
     iterM
       (fun binding ->
         match binding with
-        | NonRec (var, expr) -> emit_core_binding_decl buf ctx var expr
+        | NonRec (var, expr) -> emit_core_binding_decl funcs ctx var expr
         | Rec bds ->
             iterM
-              (fun (var, expr) -> emit_core_binding_decl buf ctx var expr)
+              (fun (var, expr) -> emit_core_binding_decl funcs ctx var expr)
               bds
         | RecType _ -> ok ())
       binding
@@ -546,10 +597,10 @@ let emit_core core =
     iterM
       (fun binding ->
         match binding with
-        | NonRec (var, expr) -> emit_core_binding buf ctx var expr
+        | NonRec (var, expr) -> emit_core_binding funcs ctx var expr
         | Rec bds ->
-            iterM (fun (var, expr) -> emit_core_binding buf ctx var expr) bds
+            iterM (fun (var, expr) -> emit_core_binding funcs ctx var expr) bds
         | RecType _ -> ok ())
       binding
   in
-  Buffer.to_bytes buf
+  C.show_csource @@ List.rev @@ !funcs

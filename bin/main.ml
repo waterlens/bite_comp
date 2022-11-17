@@ -34,7 +34,7 @@ let run_core file =
   try
     let core = Core_parser.start Core_lexer.tokenize buf in
     match Core.emit_core core with
-    | Ok bs -> Printf.printf "%s\n" @@ Bytes.to_string bs
+    | Ok bs -> Printf.printf "%s\n" bs
     | Error reason -> Printf.printf "%s\n" @@ Core.show_fail_reason reason
   with
   | Core_parser.Error ->

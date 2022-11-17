@@ -103,3 +103,5 @@ let make_cfunction_declaration name return parameters =
   { name; return; parameters; statements = None }
 
 type csource = cfunction list
+
+let show_csource src = String.concat "" @@ List.map show_cfunction src
