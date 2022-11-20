@@ -2,8 +2,8 @@ let EXN = type #cont [#handle #return [%int]] end
 let
   main = \(_1: #unit).
     case
-      mark (hexn: EXN) in
-      goto hexn(#handle)
+      mark (exn: EXN) in
+      goto exn(#handle)
     of
     | #handle -> #unit
     end

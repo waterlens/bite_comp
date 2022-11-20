@@ -90,6 +90,7 @@ rule tokenize = parse
   | whitespace      { tokenize lexbuf }
   | newline         { new_line lexbuf; tokenize lexbuf }
   | "//"            { comment lexbuf }
+  | "/*"            { long_comment lexbuf }
   | int_lit   as x  { TK_INT_LITERAL (int_of_string x) }
   | bool_lit  as x  { TK_BOOL_LITERAL (bool_of_string x) }
   | identfier as x  { 
@@ -104,6 +105,11 @@ rule tokenize = parse
 and comment = parse
   | newline     { new_line lexbuf; tokenize lexbuf }
   | _           { comment lexbuf }
+
+and long_comment = parse
+  | newline     { new_line lexbuf; long_comment lexbuf }
+  | "*/"        { tokenize lexbuf }
+  | _           { long_comment lexbuf }
 
 and string buffer = parse
   | '\"'                { () }

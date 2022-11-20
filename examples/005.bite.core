@@ -1,0 +1,7 @@
+let
+  main = \(_1: #unit).
+    let i = 10 in
+    case #unit of
+    | #unit -> 0
+    end
+end

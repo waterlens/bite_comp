@@ -103,13 +103,12 @@ expr_atom:
 | "let" bd = binding "in" e = expr { Let(bd, e) }
 | "mark" v = var "in" e = expr { Mark(v, e) }
 | "goto" v = var "(" e = expr ")" { Goto(v, e) }
-| "case" e = expr "of" brs = nonempty_list(branch) "end" { Case (e, brs) } 
+| "case" e = expr "of" brs = list(branch) "end" { Case (e, brs) } 
 
 branch:
 | "|" p = pattern "->" e = expr { (p, e) }
 
 pattern:
-| v = var { PVar v }
 | ct = ctor "(" vs = nonempty_list(var) ")" { PCon (ct, vs) }
 | ct = ctor { PCon (ct, []) }
 | "_" { PWild }

@@ -1,4 +1,5 @@
 (executable
  (public_name bite_comp)
  (name main)
+ (modes byte)
  (libraries bite_comp))

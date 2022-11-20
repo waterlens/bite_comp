@@ -31,7 +31,7 @@ and expr =
   | Mark of var * expr
   | Goto of var * expr
 
-and pattern = PVar of var | PCon of ctor * var list | PWild
+and pattern = PCon of ctor * var list | PWild
 and ctor = CtUnit | CtHandle | CtReturn | CtTuple | CtCont | CtUnion
 and literal = Int of int | Bool of bool
 
@@ -129,6 +129,24 @@ let rec map3 f l1 l2 l3 =
       r :: map3 f l1 l2 l3
   | _, _, _ -> invalid_arg "map3"
 
+let rec map3M f l1 l2 l3 =
+  match (l1, l2, l3) with
+  | [], [], [] -> ok []
+  | a1 :: l1, a2 :: l2, a3 :: l3 ->
+      let* r = f a1 a2 a3 in
+      let+ n = map3M f l1 l2 l3 in
+      r :: n
+  | _, _, _ -> invalid_arg "map3"
+
+let rec mapiM i f = function
+  | [] -> ok []
+  | a :: l ->
+      let* r = f i a in
+      let+ n = mapiM (i + 1) f l in
+      r :: n
+
+let mapiM f l = mapiM 0 f l
+
 let rec fold_leftM f accu l =
   match l with
   | [] -> ok accu
@@ -144,6 +162,14 @@ type fail_reason =
 let wrong_info x = WrongInfo x
 let lack_info x = LackInfo x
 let not_applicable x = NotApplicable x
+
+let cexpr_of_ctor = function
+  | CtUnit -> ok @@ C.lit @@ C.lint 1
+  | CtReturn -> ok @@ C.lit @@ C.lint 2
+  | CtHandle -> ok @@ C.lit @@ C.lint 3
+  | CtTuple -> ok @@ C.lit @@ C.lint 4
+  | CtCont -> ok @@ C.lit @@ C.lint 5
+  | CtUnion -> error @@ not_applicable "union should not be nested"
 
 let show_fail_reason = function
   | NotApplicable s -> s
@@ -164,7 +190,11 @@ let type_of_var ctx = function
       @@ List.assoc_opt s ctx
   | Annotated (_, ty) -> ok ty
 
-let type_of ctx = function
+let rec type_of_var' ctx var =
+  let+ t = type_of_var ctx var in
+  expand_type_var ctx t
+
+and expand_type_var ctx = function
   | TVar var as ty -> value ~default:ty @@ type_of_var ctx var
   | _ as ty -> ty
 
@@ -173,7 +203,7 @@ let rec equal_ty ctx t1 t2 =
   match (t1, t2) with
   | TVar v1, TVar v2 when name_of_var v1 = name_of_var v2 -> true
   | _ -> (
-      match (type_of ctx t1, type_of ctx t2) with
+      match (expand_type_var ctx t1, expand_type_var ctx t2) with
       | TCtor (c1, ts1), TCtor (c2, ts2) ->
           c1 = c2
           && List.length ts1 = List.length ts2
@@ -197,7 +227,6 @@ let rec exhaust ctx branches types exhausted =
   | (pat, _) :: xs -> (
       match pat with
       | PWild -> exhaust ctx xs types true
-      | PVar _ -> exhaust ctx xs types true
       | PCon (ctor, _) ->
           exhaust ctx xs
             (List.filter
@@ -213,8 +242,8 @@ let check_bind eq t1 t2 =
   | (Ok t1 as t), Ok t2 when eq t1 t2 -> t
   | (Ok _ as t), Error (LackInfo _) -> t
   | Error (LackInfo _), (Ok _ as t) -> t
-  | (Error _ as e), _ -> e
   | _, (Error _ as e) -> e
+  | (Error _ as e), _ -> e
   | Ok _, Ok _ ->
       error
       @@ wrong_info
@@ -226,9 +255,65 @@ let types_of_vars ctx =
       let name = name_of_var var in
       (name, ty))
 
-let rec type_of_expr ctx =
+let check_and_update_pattern_bindings ctx vars tys eq =
+  let+ tys =
+    map2M (check_bind eq) (List.map (type_of_var ctx) vars) (List.map ok tys)
+  in
+  let bindings = List.map2 (fun var ty -> (name_of_var var, ty)) vars tys in
+  bindings @ ctx
+
+let check_pattern_var_num vars tys =
+  if List.length vars <> List.length tys then
+    error @@ wrong_info
+    @@ sprintf "wrong number of pattern variables: expected %d, got %d"
+         (List.length tys) (List.length vars)
+  else ok ()
+
+let match_ctor_with_types types ctor =
+  let+ ty =
+    Option.to_result
+      ~none:
+        (wrong_info
+        @@ sprintf "can't found type for ctor: %s"
+        @@ string_of_ctor ctor)
+    @@ List.find_opt
+         (fun ty ->
+           match ty with
+           | TCtor (ctor', _) when ctor = ctor' -> true
+           | _ -> false)
+         types
+  in
+  ty
+
+let bind_type_in_pattern ctx pat ty =
+  let eq = equal_ty ctx in
+  match pat with
+  | PWild -> ok ctx
+  | PCon (ctor, vars) -> (
+      match ty with
+      | TCtor (ctor', tys) when ctor = ctor' ->
+          let* _ = check_pattern_var_num vars tys in
+          check_and_update_pattern_bindings ctx vars tys eq
+      | _ -> error @@ wrong_info "not a correct ctor type")
+
+let bind_type_in_union_pattern ctx pat types =
+  let eq = equal_ty ctx in
+  match pat with
+  | PWild -> ok ctx
+  | PCon (ctor, vars) -> (
+      let* ty = match_ctor_with_types types ctor in
+      match ty with
+      | TCtor (ctor', tys) when ctor = ctor' ->
+          let* _ = check_pattern_var_num vars tys in
+          check_and_update_pattern_bindings ctx vars tys eq
+      | _ -> error @@ wrong_info "not a correct ctor type")
+
+let rec type_of_expr' ctx expr =
+  let+ t = type_of_expr ctx expr in
+  expand_type_var ctx t
+
+and type_of_expr ctx =
   let ( =* ) t1 t2 = equal_ty ctx t1 t2 in
-  let check_bind = check_bind ( =* ) in
   function
   | Var v -> type_of_var ctx v
   | Lam (x, b) ->
@@ -236,8 +321,7 @@ let rec type_of_expr ctx =
       let* bt = type_of_expr ((name_of_var x, xt) :: ctx) b in
       ok @@ TArrow (xt, bt)
   | App (x, y) -> (
-      let* xt = type_of_expr ctx x in
-      let xt = type_of ctx xt in
+      let* xt = type_of_expr' ctx x in
       match xt with
       | TArrow (a, b) ->
           let* ty = type_of_expr ctx y in
@@ -250,65 +334,11 @@ let rec type_of_expr ctx =
       else
         let* xst = mapM (fun x -> type_of_expr ctx x) xs in
         ok @@ TCtor (ctor, xst)
-  | Let (bind, e2) ->
+  | Let (bind, expr) ->
       let* new_ctx = update_ctx_with_binding ctx bind ~allow_rec:false in
-      type_of_expr new_ctx e2
+      type_of_expr new_ctx expr
   | Case (expr, branches) -> (
-      let* ty = type_of_expr ctx expr in
-      let ty = type_of ctx ty in
-      let check_pattern_bind ctx vars tys =
-        let+ tys =
-          map2M check_bind
-            (List.map (fun x -> type_of_var ctx x) vars)
-            (List.map (fun x -> ok x) tys)
-        in
-        let bindings =
-          List.map2 (fun var ty -> (name_of_var var, ty)) vars tys
-        in
-        bindings @ ctx
-      in
-      let check_pattern_var_num vars tys =
-        if List.length vars <> List.length tys then
-          error @@ wrong_info
-          @@ sprintf "wrong number of pattern variables: expected %d, got %d"
-               (List.length tys) (List.length vars)
-        else ok ()
-      in
-      let bind_pattern ctx pat ty =
-        match pat with
-        | PWild -> ok ctx
-        | PVar v -> ok @@ ((name_of_var v, ty) :: ctx)
-        | PCon (ctor, vars) -> (
-            match ty with
-            | TCtor (ctor', tys) when ctor = ctor' ->
-                let* _ = check_pattern_var_num vars tys in
-                check_pattern_bind ctx vars tys
-            | _ -> error @@ wrong_info "not a correct ctor type")
-      in
-      let bind_union_pattern ctx pat types =
-        match pat with
-        | PWild -> ok ctx
-        | PVar v -> ok @@ ((name_of_var v, TCtor (CtUnion, types)) :: ctx)
-        | PCon (ctor, vars) -> (
-            let* ty =
-              Option.to_result
-                ~none:
-                  (wrong_info
-                  @@ sprintf "can't found type for ctor: %s"
-                  @@ string_of_ctor ctor)
-              @@ List.find_opt
-                   (fun ty ->
-                     match ty with
-                     | TCtor (ctor', _) when ctor = ctor' -> true
-                     | _ -> false)
-                   types
-            in
-            match ty with
-            | TCtor (ctor', tys) when ctor = ctor' ->
-                let* _ = check_pattern_var_num vars tys in
-                check_pattern_bind ctx vars tys
-            | _ -> error @@ wrong_info "not a correct ctor type")
-      in
+      let* ty = type_of_expr' ctx expr in
       let check_branches_type_same f =
         let* brt =
           mapM
@@ -330,7 +360,7 @@ let rec type_of_expr ctx =
           if exhausted then
             if filter_never_type remained = [] then
               check_branches_type_same (fun pat ->
-                  bind_union_pattern ctx pat xs)
+                  bind_type_in_union_pattern ctx pat xs)
             else error @@ wrong_info "unused cases"
           else
             error @@ wrong_info
@@ -341,7 +371,8 @@ let rec type_of_expr ctx =
           let exhausted, remained = exhaust ctx branches [ t ] false in
           if exhausted then
             if filter_never_type remained = [] then
-              check_branches_type_same (fun pat -> bind_pattern ctx pat t)
+              check_branches_type_same (fun pat ->
+                  bind_type_in_pattern ctx pat t)
             else error @@ wrong_info "unused cases"
           else
             error @@ wrong_info
@@ -351,10 +382,12 @@ let rec type_of_expr ctx =
       | TNever ->
           if branches = [] then ok TNever
           else error @@ wrong_info "can't match never type"
-      | _ -> error @@ wrong_info "can't match these types")
+      | _ as t ->
+          error @@ wrong_info
+          @@ sprintf "can't match this type: %s"
+          @@ show_ty t)
   | Mark (var, exp) -> (
-      let* label = type_of_var ctx var in
-      let label = type_of ctx label in
+      let* label = type_of_var' ctx var in
       match label with
       | TCtor (CtCont, [ x; y ]) ->
           let new_ctx = (name_of_var var, label) :: ctx in
@@ -378,8 +411,7 @@ let rec type_of_expr ctx =
           @@ sprintf "%s: label should be annotated with cont type"
                (name_of_var var))
   | Goto (var, exp) ->
-      let* label = type_of_var ctx var in
-      let label = type_of ctx label in
+      let* label = type_of_var' ctx var in
       let+ _ =
         match label with
         | TCtor (CtCont, x :: _) ->
@@ -457,17 +489,17 @@ let cexpr_of_var cexprctx name =
   @@ List.assoc_opt name cexprctx
 
 let rec ty_to_ctype ctx = function
-  | TVar _ as t -> ty_to_ctype ctx @@ type_of ctx t
+  | TVar _ as t -> ty_to_ctype ctx @@ expand_type_var ctx t
   | TCtor (ctor, _) -> (
       ok
       @@
       match ctor with
-      | CtUnit -> C.inline_type "struct rt_unit *"
-      | CtReturn -> C.inline_type "struct rt_return *"
-      | CtHandle -> C.inline_type "struct rt_handle *"
-      | CtTuple -> C.inline_type "struct rt_tuple *"
-      | CtCont -> C.inline_type "struct rt_cont *"
-      | CtUnion -> C.inline_type "union rt_union *")
+      | CtUnit -> C.raw_type "rt_ty_unit *" [||]
+      | CtReturn -> C.raw_type "rt_ty_return *" [||]
+      | CtHandle -> C.raw_type "rt_ty_handle *" [||]
+      | CtTuple -> C.raw_type "rt_ty_tuple *" [||]
+      | CtCont -> C.raw_type "rt_ty_cont *" [||]
+      | CtUnion -> C.raw_type "rt_ty_union *" [||])
   | TApp _ | TForall _ ->
       error @@ not_applicable "unable to convert high order type to ctype"
   | TArrow (a, b) ->
@@ -476,19 +508,20 @@ let rec ty_to_ctype ctx = function
       C.func b [ a ]
   | TLit TInt -> ok @@ C.int
   | TLit TBool -> ok @@ C.int
-  | TNever -> ok @@ C.void
+  | TNever -> ok @@ C.ptr @@ C.void
 
-let placeholder = C.inline_expr "rt_expr_placeholer"
-
-let fplaceholder =
-  C.make_cfunction_declaration "rt_function_placeholder" (C.ptr C.void) []
+let ctype_of_expr ctx expr =
+  let* t = type_of_expr ctx expr in
+  let+ ct = ty_to_ctype ctx t in
+  ct
 
 let emit_core_binding_decl funcs tyctx var = function
   | Lam (x, b) ->
       let* t1 = type_of_var tyctx x in
       let* t1' = ty_to_ctype tyctx t1 in
-      let* t2 = type_of_expr ((name_of_var x, t1) :: tyctx) b in
-      let* t2' = ty_to_ctype tyctx t2 in
+      let nx = name_of_var x in
+      let tyctx = (nx, t1) :: tyctx in
+      let* t2' = ctype_of_expr tyctx b in
       let cfunc =
         C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
       in
@@ -498,7 +531,37 @@ let emit_core_binding_decl funcs tyctx var = function
       error
       @@ not_applicable "other expressions are not allowed in global scope"
 
-let rec emit_expr fresh stmts tyctx cexprctx = function
+let bind_vars_in_pattern_aux tyctx cexprctx fresh stmts (ctor, vars) ty cexpr =
+  match ty with
+  | TCtor (ctor', tys) when ctor = ctor' ->
+      let vts = List.combine vars tys in
+      let+ nvb =
+        mapiM
+          (fun i (var, ty) ->
+            let* ct = ty_to_ctype tyctx ty in
+            let tmp = fresh () in
+            let st =
+              C.decl tmp ct @@ Option.some
+              @@ C.raw_expr "rt_extract_field(#0, #1)"
+                   [| cexpr; C.lit @@ C.lint i |]
+            in
+            stmts := st :: !stmts;
+            ok (name_of_var var, C.var tmp))
+          vts
+      in
+      nvb @ cexprctx
+  | _ -> error @@ wrong_info "not a correct ctor type"
+
+let bind_vars_in_pattern tyctx cexprctx fresh stmts (pat, _) types cexpr =
+  match pat with
+  | PWild -> ok cexprctx
+  | PCon (ctor, vars) ->
+      let* ty = match_ctor_with_types types ctor in
+      bind_vars_in_pattern_aux tyctx cexprctx fresh stmts (ctor, vars) ty cexpr
+
+let rec emit_expr fresh stmts tyctx cexprctx =
+  let emit_expr_aux x = emit_expr fresh stmts tyctx cexprctx x in
+  function
   | Var var ->
       let+ cexpr = cexpr_of_var cexprctx @@ name_of_var var in
       cexpr
@@ -507,24 +570,30 @@ let rec emit_expr fresh stmts tyctx cexprctx = function
       @@ not_applicable
            "doesn't allow high order functions in normal expressions"
   | App (f, a) as expr ->
-      let* f = emit_expr fresh stmts tyctx cexprctx f in
-      let* a = emit_expr fresh stmts tyctx cexprctx a in
-      let* t = type_of_expr tyctx expr in
-      let* ct = ty_to_ctype tyctx t in
+      let* f = emit_expr_aux f in
+      let* a = emit_expr_aux a in
+      let* ct = ctype_of_expr tyctx expr in
       let tmp = fresh () in
       let st = C.decl tmp ct @@ Option.some @@ C.call f [ a ] in
       stmts := st :: !stmts;
       ok @@ C.var tmp
-  | Ctor (ctor, xs) -> ok placeholder
+  | Ctor (ctor, xs) -> (
+      let* xs = mapM (fun x -> emit_expr_aux x) xs in
+      match ctor with
+      | CtUnit -> ok @@ C.call (C.var "rt_make_unit") []
+      | CtReturn -> ok @@ C.raw_expr "rt_make_return(#@)" @@ Array.of_list xs
+      | CtHandle -> ok @@ C.raw_expr "rt_make_handle(#@)" @@ Array.of_list xs
+      | CtTuple -> ok @@ C.raw_expr "rt_make_tuple(#@)" @@ Array.of_list xs
+      | CtCont -> ok @@ C.raw_expr "rt_make_cont(#@)" @@ Array.of_list xs
+      | CtUnion -> ok @@ C.raw_expr "rt_make_union(#@)" @@ Array.of_list xs)
   | Lit (Bool b) -> ok @@ C.lit @@ C.lbool b
   | Lit (Int n) -> ok @@ C.lit @@ C.lint n
   | Let (binding, e) ->
-      let emit_local_bind = function
+      let emit_local_binding = function
         | NonRec (var, expr) ->
             let tmp = fresh () in
-            let* t = type_of_expr tyctx expr in
-            let* ct = ty_to_ctype tyctx t in
-            let+ init = emit_expr fresh stmts tyctx cexprctx expr in
+            let* ct = ctype_of_expr tyctx expr in
+            let+ init = emit_expr_aux expr in
             let st = C.decl tmp ct @@ Option.some init in
             stmts := st :: !stmts;
             (tyctx, (name_of_var var, C.var tmp) :: cexprctx)
@@ -532,11 +601,7 @@ let rec emit_expr fresh stmts tyctx cexprctx = function
             let tmps = List.map (fun _ -> fresh ()) bindings in
             let* ts = types_of_vars tyctx bindings in
             let* cts = mapM (fun (_, ty) -> ty_to_ctype tyctx ty) ts in
-            let+ inits =
-              mapM
-                (fun (_, expr) -> emit_expr fresh stmts tyctx cexprctx expr)
-                bindings
-            in
+            let+ inits = mapM (fun (_, expr) -> emit_expr_aux expr) bindings in
             let sts =
               map3
                 (fun tmp ct init -> C.decl tmp ct @@ Option.some init)
@@ -551,20 +616,114 @@ let rec emit_expr fresh stmts tyctx cexprctx = function
             let+ tyctx = update_ctx_with_type_rec_binding tyctx bindings in
             (tyctx, cexprctx)
       in
-      let* (tyctx, cexprctx) = emit_local_bind binding in
-      ok placeholder
-  | Case (e, branches) -> ok placeholder
-  | Mark (label, exp) -> ok placeholder
-  | Goto (label, exp) -> ok placeholder
+      let* tyctx, cexprctx = emit_local_binding binding in
+      let tmp = fresh () in
+      let* ct = ctype_of_expr tyctx e in
+      let* e = emit_expr fresh stmts tyctx cexprctx e in
+      let st = C.decl tmp ct @@ Option.some e in
+      stmts := st :: !stmts;
+      ok @@ C.var tmp
+  | Case (e, branches) as e' ->
+      let* t = type_of_expr' tyctx e in
+      let* ct = ctype_of_expr tyctx e' in
+      let* ce = emit_expr_aux e in
+      let tag = C.raw_expr "rt_extract_tag(#0)" [| ce |] in
+      let emit_branch (pat, expr) stmts output =
+        let* new_tyctx =
+          match t with
+          | TCtor (CtUnion, xs) -> bind_type_in_union_pattern tyctx pat xs
+          | TCtor _ as t' -> bind_type_in_pattern tyctx pat t'
+          | _ -> raise @@ Exn "unreachable"
+        in
+        let ts =
+          match t with
+          | TCtor (CtUnion, xs) -> xs
+          | TCtor _ as t' -> [ t' ]
+          | _ -> raise @@ Exn "unreachable"
+        in
+        let* new_cexprctx =
+          bind_vars_in_pattern tyctx cexprctx fresh stmts (pat, expr) ts ce
+        in
+        let* bre = emit_expr fresh stmts new_tyctx new_cexprctx expr in
+        let st = C.expr @@ C.asgn (C.var output) bre in
+        stmts := st :: !stmts;
+        ok ()
+      in
+      let out = fresh () in
+      let* bre =
+        mapM
+          (fun (pat, expr) ->
+            let stmts = ref [] in
+            let* () = emit_branch (pat, expr) stmts out in
+            let stmts = C.block @@ List.rev (C.break :: !stmts) in
+            match pat with
+            | PWild -> ok (Option.none, stmts)
+            | PCon (ctor, _) ->
+                let+ disc = cexpr_of_ctor ctor in
+                (Option.some disc, stmts))
+          branches
+      in
+      let st = C.decl out ct @@ Option.none in
+      let sw = C.switch tag bre in
+      stmts := sw :: st :: !stmts;
+      ok @@ C.var out
+  | Mark (label, exp) as e' ->
+      let name = name_of_var label in
+      let* ct = ctype_of_expr tyctx e' in
+      let* lt = type_of_var' tyctx label in
+      let* clt = ty_to_ctype tyctx lt in
+      let tmp = fresh () in
+      let mk_label =
+        C.decl tmp clt @@ Option.some @@ C.raw_expr "rt_new_label()" [||]
+      in
+      let out = fresh () in
+      let out_decl = C.decl out ct Option.none in
+      let normal = ref [] in
+      let* result =
+        emit_expr fresh normal ((name, lt) :: tyctx)
+          ((name, C.var tmp) :: cexprctx)
+          exp
+      in
+      let st = C.expr @@ C.asgn (C.var out) result in
+      normal := st :: !normal;
+      let st =
+        C.if'
+          (C.raw_expr "rt_mark(#0)" [| C.var tmp |])
+          (C.expr
+          @@ C.asgn (C.var out)
+               (C.raw_expr "rt_get_data_from_cont(#0)" [| C.var tmp |]))
+          (Option.some @@ C.block @@ List.rev !normal)
+      in
+      stmts := st :: out_decl :: mk_label :: !stmts;
+      ok @@ C.var out
+  | Goto (label, exp) ->
+      let* arg = emit_expr_aux exp in
+      let* var = cexpr_of_var cexprctx (name_of_var label) in
+      let st = C.expr @@ C.raw_expr "rt_goto(#0, #1)" [| var; arg |] in
+      stmts := st :: !stmts;
+      ok @@ C.raw_expr "rt_unreachable()" [||]
 
-let emit_core_binding funcs tyctx var = function
+let emit_core_binding funcs tyctx cexprctx var = function
   | Lam (x, b) ->
       let* t1 = type_of_var tyctx x in
       let* t1' = ty_to_ctype tyctx t1 in
-      let* t2 = type_of_expr ((name_of_var x, t1) :: tyctx) b in
-      let* t2' = ty_to_ctype tyctx t2 in
+      let nx = name_of_var x in
+      let tyctx = (nx, t1) :: tyctx in
+      let* t2 = ctype_of_expr tyctx b in
+      let fresh_id = ref 0 in
+      let fresh () =
+        let id = !fresh_id in
+        fresh_id := id + 1;
+        "tmp_" ^ string_of_int id
+      in
+      let stmts = ref [] in
+      let cexprctx = (nx, C.var nx) :: cexprctx in
+      let* final = emit_expr fresh stmts tyctx cexprctx b in
+      let stmts = List.rev (C.return final :: !stmts) in
       let cfunc =
-        C.make_cfunction_declaration (name_of_var var) t2' [ (None, t1') ]
+        C.make_cfunction (name_of_var var) t2
+          [ (Option.some @@ name_of_var x, t1') ]
+          stmts
       in
       funcs := cfunc :: !funcs;
       ok ()
@@ -572,35 +731,53 @@ let emit_core_binding funcs tyctx var = function
       error
       @@ not_applicable "other expressions are not allowed in global scope"
 
+let update_cexpr_ctx_with_binding cexprctx = function
+  | NonRec (x, _) ->
+      let name = name_of_var x in
+      (name, C.var name) :: cexprctx
+  | Rec bindings ->
+      let names = List.map (fun (var, _) -> name_of_var var) bindings in
+      let new_bindingds = List.combine names (List.map C.var names) in
+      new_bindingds @ cexprctx
+  | RecType _ -> cexprctx
+
 let emit_core core =
-  let ctx = [] in
   let (Core binding) = core in
-  let* ctx =
-    fold_leftM
-      (fun ctx binding -> update_ctx_with_binding ctx binding ~allow_rec:true)
-      ctx binding
-  in
   let funcs = ref [] in
-  let* () =
-    iterM
-      (fun binding ->
-        match binding with
-        | NonRec (var, expr) -> emit_core_binding_decl funcs ctx var expr
-        | Rec bds ->
-            iterM
-              (fun (var, expr) -> emit_core_binding_decl funcs ctx var expr)
-              bds
-        | RecType _ -> ok ())
-      binding
+  (* forward declaration *)
+  let* _ =
+    fold_leftM
+      (fun tyctx binding ->
+        let* tyctx = update_ctx_with_binding tyctx binding ~allow_rec:true in
+        let* _ =
+          match binding with
+          | NonRec (var, expr) -> emit_core_binding_decl funcs tyctx var expr
+          | Rec bds ->
+              iterM
+                (fun (var, expr) -> emit_core_binding_decl funcs tyctx var expr)
+                bds
+          | RecType _ -> ok ()
+        in
+        ok tyctx)
+      [] binding
   in
-  let+ () =
-    iterM
-      (fun binding ->
-        match binding with
-        | NonRec (var, expr) -> emit_core_binding funcs ctx var expr
-        | Rec bds ->
-            iterM (fun (var, expr) -> emit_core_binding funcs ctx var expr) bds
-        | RecType _ -> ok ())
-      binding
+  let+ _ =
+    fold_leftM
+      (fun (tyctx, cexprctx) binding ->
+        let* tyctx = update_ctx_with_binding tyctx binding ~allow_rec:true in
+        let cexprctx = update_cexpr_ctx_with_binding cexprctx binding in
+        let* _ =
+          match binding with
+          | NonRec (var, expr) ->
+              emit_core_binding funcs tyctx cexprctx var expr
+          | Rec bds ->
+              iterM
+                (fun (var, expr) ->
+                  emit_core_binding funcs tyctx cexprctx var expr)
+                bds
+          | RecType _ -> ok ()
+        in
+        ok (tyctx, cexprctx))
+      ([], []) binding
   in
-  C.show_csource @@ List.rev @@ !funcs
+  C.pp_csource @@ List.rev @@ !funcs
