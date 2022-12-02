@@ -129,20 +129,29 @@ let pp_cfunction { name; return; parameters; statements } =
       | _ -> sprintf ");");
     ]
 
-let pp_csource src = String.concat "" @@ List.map pp_cfunction src
+let prologue = {|#include "runtime.h"
+|}
+
+let epilogue = {||}
+
+let pp_csource src =
+  sprintf "%s%s%s" prologue
+    (String.concat "" @@ List.map pp_cfunction src)
+    epilogue
 
 let substitute_placeholders_with s xs =
   let ph_pat = Str.regexp {|#\([0-9]+\)|} in
   let ph_pat' = Str.regexp {|#@|} in
+  let ph_pat'' = Str.regexp {|#~|} in
   let buf = Buffer.create 32 in
   Array.iteri
     (fun n x ->
       if n <> 0 then Buffer.add_string buf ", ";
       Buffer.add_string buf @@ pp_cexpr x)
     xs;
-  let array =
-    sprintf "(void *[%d]){%s}" (Array.length xs)
-      (String.of_bytes @@ Buffer.to_bytes buf)
+  let n = string_of_int @@ Array.length xs in
+  let arr_str =
+    sprintf "(void *[%s]){%s}" n (String.of_bytes @@ Buffer.to_bytes buf)
   in
   let s =
     Str.global_substitute ph_pat
@@ -151,7 +160,7 @@ let substitute_placeholders_with s xs =
         pp_cexpr xs.(n))
       s
   in
-  Str.global_replace ph_pat' array s
+  Str.global_replace ph_pat' arr_str s |> Str.global_replace ph_pat'' n
 
 let raw_type t xs = RawType (substitute_placeholders_with t xs)
 let raw_expr s xs = RawExpr (substitute_placeholders_with s xs)

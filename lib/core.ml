@@ -581,11 +581,11 @@ let rec emit_expr fresh stmts tyctx cexprctx =
       let* xs = mapM (fun x -> emit_expr_aux x) xs in
       match ctor with
       | CtUnit -> ok @@ C.call (C.var "rt_make_unit") []
-      | CtReturn -> ok @@ C.raw_expr "rt_make_return(#@)" @@ Array.of_list xs
-      | CtHandle -> ok @@ C.raw_expr "rt_make_handle(#@)" @@ Array.of_list xs
-      | CtTuple -> ok @@ C.raw_expr "rt_make_tuple(#@)" @@ Array.of_list xs
-      | CtCont -> ok @@ C.raw_expr "rt_make_cont(#@)" @@ Array.of_list xs
-      | CtUnion -> ok @@ C.raw_expr "rt_make_union(#@)" @@ Array.of_list xs)
+      | CtReturn -> ok @@ C.raw_expr "rt_make_return(#~, #@)" @@ Array.of_list xs
+      | CtHandle -> ok @@ C.raw_expr "rt_make_handle(#~, #@)" @@ Array.of_list xs
+      | CtTuple -> ok @@ C.raw_expr "rt_make_tuple(#~, #@)" @@ Array.of_list xs
+      | CtCont -> ok @@ C.raw_expr "rt_make_cont(#~, #@)" @@ Array.of_list xs
+      | CtUnion -> ok @@ C.raw_expr "rt_make_union(#~, #@)" @@ Array.of_list xs)
   | Lit (Bool b) -> ok @@ C.lit @@ C.lbool b
   | Lit (Int n) -> ok @@ C.lit @@ C.lint n
   | Let (binding, e) ->
